@@ -222,6 +222,7 @@ anim = fdtd_rectangle_with_pml(10, 10, 1000, 0.2, 800)
 HTML(anim.to_html5_video())
 """
 
+import os
 import math
 import numpy as np
 import scipy.signal
@@ -614,6 +615,11 @@ class Microphone:
             bit_depth: Bit depth (16 or 32)
         """
         audio, sr = self.get_audio(target_sr=target_sr, normalize=normalize)
+        
+        # Ensure output directory exists
+        output_dir = os.path.dirname(filename)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
         
         # Convert to appropriate integer format
         audio_int = (audio * 32767).astype(np.int16)
@@ -1499,7 +1505,7 @@ def fdtd_rectangle_with_pml(x: float, y: float, f_max: float, courant: float,
         
         # Save audio from microphones
         if mic_positions is not None and len(microphones) > 0:
-            prefix = audio_output_prefix or 'fdtd_audio'
+            prefix = audio_output_prefix or 'output/fdtd_audio'
             for i, mic in enumerate(microphones):
                 filename = f"{prefix}_mic{i}.wav"
                 mic.save_wav(filename, target_sr=audio_sr)
@@ -1602,6 +1608,10 @@ def fdtd_rectangle_with_pml(x: float, y: float, f_max: float, courant: float,
     
     # Save to file or display
     if output_file is not None:
+        # Ensure output directory exists
+        output_dir = os.path.dirname(output_file)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
         print(f"Saving animation to {output_file}...")
         # Determine writer based on file extension
         if output_file.endswith('.gif'):
@@ -1650,7 +1660,7 @@ def fdtd_rectangle_with_pml(x: float, y: float, f_max: float, courant: float,
         
         # Save audio from microphones
         if mic_positions is not None and len(microphones) > 0:
-            prefix = audio_output_prefix or 'fdtd_audio'
+            prefix = audio_output_prefix or 'output/fdtd_audio'
             for i, mic in enumerate(microphones):
                 filename = f"{prefix}_mic{i}.wav"
                 mic.save_wav(filename, target_sr=audio_sr)
@@ -1673,7 +1683,7 @@ if __name__ == "__main__":
         courant=0.2, 
         pml_coeff=800,
         pml_thickness=15, 
-        output_file='fdtd_animation.gif',
+        output_file='output/fdtd_animation.gif',
         mic_positions=[(2, 2)],
     )
     

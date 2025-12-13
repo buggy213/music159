@@ -90,7 +90,9 @@ def plot_deconvolution_result(t, s, h_true, g, h_recovered, title="Deconvolution
         plt.show()
     else:
         # No display, save to default file
-        default_name = title.replace(' ', '_').replace('\n', '_')[:50] + '.png'
+        import os
+        os.makedirs("output", exist_ok=True)
+        default_name = "output/" + title.replace(' ', '_').replace('\n', '_')[:50] + '.png'
         plt.savefig(default_name, dpi=150)
         print(f"No display available. Saved: {default_name}")
         plt.close(fig)
@@ -404,7 +406,7 @@ class TestWienerDeconvolveVisual:
         
         plot_deconvolution_result(t, s, h_true, g, h_recovered,
                                    "Gaussian Source × Gaussian IR",
-                                   filename="test_deconv_gaussian_gaussian.png")
+                                   filename="output/test_deconv_gaussian_gaussian.png")
     
     @pytest.mark.visual
     def test_visual_decaying_exponential(self):
@@ -440,7 +442,7 @@ class TestWienerDeconvolveVisual:
         plot_deconvolution_result(t, s, h_true, g, h_recovered,
                                    "Gaussian Source × Decaying Exponential IR\n"
                                    "(Ringing before onset is expected - limited source bandwidth)",
-                                   filename="test_deconv_exponential.png")
+                                   filename="output/test_deconv_exponential.png")
     
     @pytest.mark.visual
     def test_visual_regularization_comparison(self):
@@ -512,7 +514,7 @@ class TestWienerDeconvolveVisual:
         
         plt.tight_layout()
         
-        filename = "test_deconv_regularization.png"
+        filename = "output/test_deconv_regularization.png"
         plt.savefig(filename, dpi=150)
         print(f"Saved: {filename}")
         plt.close(fig)
