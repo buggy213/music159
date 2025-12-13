@@ -574,6 +574,114 @@ class Microphone:
             Tuple of (raw signal, native sample rate)
         """
         return np.array(self.recordings), self.get_native_sample_rate()
+    
+    def deconvolve_impulse_response(
+        self, 
+        source: 'Source',
+        regularization: float = 1e-3,
+        target_sr: int = 44100,
+        normalize: bool = True
+    ) -> Tuple[np.ndarray, int]:
+        """Extract impulse response by deconvolving the source signal from recording.
+        
+        Uses Wiener deconvolution: H(f) = G(f) * conj(S(f)) / (|S(f)|^2 + λ)
+        where:
+            - H(f) is the impulse response (what we want)
+            - G(f) is the recorded signal
+            - S(f) is the source signal
+            - λ is the regularization parameter
+        
+        Args:
+            source: The Source object that was used in the simulation
+            regularization: Regularization parameter to avoid division by zero.
+                           Higher values = more noise suppression but less accuracy.
+                           Typical range: 1e-6 to 1e-1
+            target_sr: Target sample rate for output (Hz)
+            normalize: Whether to normalize the impulse response
+            
+        Returns:
+            Tuple of (impulse response array, sample rate)
+        """
+        if len(self.recordings) == 0:
+            raise RuntimeError("No recordings. Run the simulation first.")
+        if self._params is None:
+            raise RuntimeError("Microphone not attached to a grid.")
+        
+        # Get raw recording at native sample rate
+        recording = np.array(self.recordings, dtype=np.float64)
+        dt = self._params.dt
+        n_samples = len(recording)
+        
+        # Generate the source signal at the same sample rate
+        source_signal = np.zeros(n_samples)
+        for i in range(n_samples):
+            t = i * dt
+            source_signal[i] = source.get_value(t, dt)
+        
+        # Perform Wiener deconvolution in frequency domain
+        G = np.fft.rfft(recording)
+        S = np.fft.rfft(source_signal)
+        
+        # Wiener filter: H = G * conj(S) / (|S|^2 + λ)
+        S_conj = np.conj(S)
+        S_power = np.abs(S) ** 2
+        
+        # Adaptive regularization based on signal power
+        lambda_reg = regularization * np.max(S_power)
+        
+        H = (G * S_conj) / (S_power + lambda_reg)
+        
+        # Transform back to time domain
+        ir = np.fft.irfft(H)
+        
+        # Resample to target sample rate
+        native_sr = 1.0 / dt
+        duration = n_samples / native_sr
+        num_output_samples = int(duration * target_sr)
+        
+        if num_output_samples < 1:
+            num_output_samples = 1
+        
+        ir_resampled = scipy.signal.resample(ir, num_output_samples)
+        
+        # Normalize if requested
+        if normalize:
+            max_val = np.max(np.abs(ir_resampled))
+            if max_val > 0:
+                ir_resampled = ir_resampled / max_val
+        
+        return ir_resampled, target_sr
+    
+    def save_impulse_response(
+        self,
+        source: 'Source',
+        filename: str,
+        regularization: float = 1e-3,
+        target_sr: int = 44100,
+        normalize: bool = True
+    ):
+        """Extract and save impulse response as WAV file.
+        
+        Args:
+            source: The Source object that was used in the simulation
+            filename: Output filename (should end in .wav)
+            regularization: Wiener deconvolution regularization parameter
+            target_sr: Target sample rate (Hz)
+            normalize: Whether to normalize the impulse response
+        """
+        ir, sr = self.deconvolve_impulse_response(
+            source=source,
+            regularization=regularization,
+            target_sr=target_sr,
+            normalize=normalize
+        )
+        
+        # Convert to 16-bit integer
+        ir_int = (ir * 32767).astype(np.int16)
+        wavfile.write(filename, sr, ir_int)
+        
+        duration = len(ir) / sr
+        print(f"Saved impulse response ({duration:.3f}s) to {filename} ({sr}Hz, 16-bit)")
 
 
 class SimulationParams:
@@ -615,13 +723,18 @@ class SimulationParams:
         self.pml_halo = 2 * self.d_1 - 1
 
 class Interface:
-    """Handles bidirectional data transfer between components (FDTDGrid-FDTDGrid or FDTDGrid-PML)."""
+    """Handles bidirectional data transfer between components (FDTDGrid-FDTDGrid or FDTDGrid-PML).
+    
+    Supports variable coupling strength to model partial transmission at boundaries.
+    """
     
     def __init__(self, edge_a: str, component_a: 'SimulationComponent', 
                  edge_b: str, component_b: 'SimulationComponent', 
                  params: SimulationParams, 
                  region_a: Optional[Tuple[int, int]] = None,
-                 region_b: Optional[Tuple[int, int]] = None):
+                 region_b: Optional[Tuple[int, int]] = None,
+                 coupling_a2b: float = 1.0,
+                 coupling_b2a: float = 1.0):
         """Initialize interface.
         
         Args:
@@ -632,6 +745,12 @@ class Interface:
             params: Simulation parameters
             region_a: Optional (start, end) tuple for partial edge coverage on component_a. If None, spans full edge.
             region_b: Optional (start, end) tuple for partial edge coverage on component_b. If None, spans full edge.
+            coupling_a2b: Coupling strength from component_a to component_b (0.0 to 1.0).
+                         1.0 = full coupling (default), data from A fully affects B's boundary.
+                         0.0 = no coupling, B uses its default boundary condition (Neumann BC).
+                         The boundary condition for component_b will be:
+                         C * (data from A) + (1-C) * (default BC)
+            coupling_b2a: Coupling strength from component_b to component_a (same semantics).
         """
         self.edge_a = edge_a
         self.edge_b = edge_b
@@ -640,6 +759,8 @@ class Interface:
         self.params = params
         self.region_a = region_a
         self.region_b = region_b
+        self.coupling_a2b = coupling_a2b
+        self.coupling_b2a = coupling_b2a
         
         # Get edge dimensions from components
         dim_a = component_a.get_edge_dimension(edge_a)
@@ -707,14 +828,14 @@ class Interface:
         return self.region_b
     
     def update(self):
-        """Perform bidirectional data transfer."""
-        # Transfer from component_a to buffer, then to component_b
+        """Perform bidirectional data transfer with coupling strength."""
+        # Transfer from component_a to component_b
         self.component_a.transfer_to_interface(self)
-        self.component_b.transfer_from_interface(self)
+        self.component_b.transfer_from_interface(self, coupling=self.coupling_a2b)
         
-        # Transfer from component_b to buffer, then to component_a
+        # Transfer from component_b to component_a
         self.component_b.transfer_to_interface(self)
-        self.component_a.transfer_from_interface(self)
+        self.component_a.transfer_from_interface(self, coupling=self.coupling_b2a)
 
 class SimulationComponent:
     """Base class for all simulation components."""
@@ -733,8 +854,13 @@ class SimulationComponent:
         """Transfer data to interface buffer."""
         raise NotImplementedError
     
-    def transfer_from_interface(self, interface: 'Interface'):
-        """Transfer data from interface buffer."""
+    def transfer_from_interface(self, interface: 'Interface', coupling: float = 1.0):
+        """Transfer data from interface buffer.
+        
+        Args:
+            interface: The interface to receive data from
+            coupling: Coupling strength (0-1). 1.0 = full coupling, 0.0 = no effect.
+        """
         raise NotImplementedError
     
     def get_edge_dimension(self, edge: str) -> int:
@@ -991,9 +1117,16 @@ class FDTDGrid(SimulationComponent):
                 start, end = region
             np.copyto(target, self.p_1[start:end, -target_halo_size:])
     
-    def transfer_from_interface(self, interface: Interface):
-        """Copy boundary data from interface buffer."""
+    def transfer_from_interface(self, interface: Interface, coupling: float = 1.0):
+        """Copy boundary data from interface buffer with optional coupling.
         
+        Args:
+            interface: The interface to receive data from
+            coupling: Coupling strength (0 to 1). 
+                     1.0 = full coupling (interface data replaces boundary)
+                     0.0 = no coupling (boundary unchanged, keeps default BC)
+                     Between = blend: C * interface_data + (1-C) * current_boundary
+        """
         if self is interface.component_a:
             region = interface.region_a
             edge = interface.edge_a
@@ -1008,15 +1141,24 @@ class FDTDGrid(SimulationComponent):
         else:
             start, end = region
 
+        # Get reference to the boundary array slice
         match edge:
             case 'top':
-                np.copyto(self.top_p[:, start:end], source)
+                boundary = self.top_p[:, start:end]
             case 'bottom':
-                np.copyto(self.bottom_p[:, start:end], source)
+                boundary = self.bottom_p[:, start:end]
             case 'left':
-                np.copyto(self.left_p[start:end, :], source)
+                boundary = self.left_p[start:end, :]
             case 'right':
-                np.copyto(self.right_p[start:end, :], source)
+                boundary = self.right_p[start:end, :]
+        
+        # Blend: boundary = C * source + (1-C) * boundary
+        if coupling >= 1.0:
+            np.copyto(boundary, source)
+        elif coupling > 0.0:
+            boundary *= (1.0 - coupling)
+            boundary += coupling * source
+        # else coupling <= 0: leave boundary unchanged (use default BC)
     
     def halo_size(self) -> int:
         return self.params.grid_halo
@@ -1185,9 +1327,12 @@ class PML(SimulationComponent):
             np.copyto(dest, base.T)
         
         
-    def transfer_from_interface(self, interface: Interface):
-        """Copy boundary data from interface buffer."""
+    def transfer_from_interface(self, interface: Interface, coupling: float = 1.0):
+        """Copy boundary data from interface buffer.
         
+        Note: PMLs always use full coupling (coupling parameter ignored) since
+        they need the full incident wave data to absorb properly.
+        """
         if interface.component_a is self:
             source = interface.b_to_a_buffer
         elif interface.component_b is self:
@@ -1292,16 +1437,16 @@ def fdtd_rectangle_with_pml(x: float, y: float, f_max: float, courant: float,
                     pml_coeff=pml_coeff, params=sim.params)
     
     # Add PMLs to simulation
-    # sim.add_simulation_component(pml_top)
-    # sim.add_simulation_component(pml_bottom)
-    # sim.add_simulation_component(pml_left)
-    # sim.add_simulation_component(pml_right)
+    sim.add_simulation_component(pml_top)
+    sim.add_simulation_component(pml_bottom)
+    sim.add_simulation_component(pml_left)
+    sim.add_simulation_component(pml_right)
     
     # Create interfaces between grid and PMLs
-    # sim.add_interface('top', grid, 'bottom', pml_top)
-    # sim.add_interface('bottom', grid, 'top', pml_bottom)
-    # sim.add_interface('left', grid, 'right', pml_left)
-    # sim.add_interface('right', grid, 'left', pml_right)
+    sim.add_interface('top', grid, 'bottom', pml_top)
+    sim.add_interface('bottom', grid, 'top', pml_bottom)
+    sim.add_interface('left', grid, 'right', pml_left)
+    sim.add_interface('right', grid, 'left', pml_right)
     
     # Print info
     print(f"real width (w/o pml): {grid.xs * sim.params.h}")
@@ -1483,8 +1628,17 @@ if __name__ == "__main__":
     # Same parameters as the original notebook
     # Save as GIF for terminal usage
     # pml_thickness=15 for better absorption (original was 5, which may cause energy issues)
-    fdtd_rectangle_with_pml(x=10, y=10, f_max=1000, courant=0.2, pml_coeff=800,
-                           pml_thickness=15, output_file='fdtd_animation.gif')
+    fdtd_rectangle_with_pml(
+        x=10, 
+        y=10, 
+        f_max=1000, 
+        courant=0.2, 
+        pml_coeff=800,
+        pml_thickness=15, 
+        output_file='fdtd_animation.gif',
+        mic_positions=[(2, 2)],
+    )
+    
     # Keep animation in scope to prevent garbage collection
     try:
         input("Press Enter to exit...")  # Keep the window open
