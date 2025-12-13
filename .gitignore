@@ -1,3 +1,5 @@
 *.gif
 *.png
 *.wav
+
+__pycache__/

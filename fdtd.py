@@ -232,6 +232,62 @@ import matplotlib.animation as animation
 from matplotlib.widgets import Slider
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
+
+def wiener_deconvolve(
+    recorded: np.ndarray,
+    source: np.ndarray,
+    regularization: float = 1e-3
+) -> np.ndarray:
+    """Perform Wiener deconvolution to extract impulse response.
+    
+    Given a recorded signal g = s * h (convolution), extract h given g and s.
+    Uses the Wiener filter: H(f) = G(f) * conj(S(f)) / (|S(f)|^2 + λ)
+    
+    Args:
+        recorded: The recorded/output signal (g)
+        source: The source/input signal (s)
+        regularization: Regularization parameter (λ) to avoid division by zero.
+                       This is relative to max signal power.
+                       Higher values = more noise suppression but potential loss of detail.
+                       Typical range: 1e-6 to 1e-1
+    
+    Returns:
+        The estimated impulse response (h), same length as input signals.
+        
+    Example:
+        >>> # Create a simple test case: h = [1, 0.5, 0.25]
+        >>> h_true = np.array([1.0, 0.5, 0.25, 0, 0, 0, 0, 0])
+        >>> s = np.array([1.0, 0, 0, 0, 0, 0, 0, 0])  # impulse
+        >>> g = np.convolve(s, h_true, mode='same')
+        >>> h_recovered = wiener_deconvolve(g, s, regularization=1e-6)
+    """
+    # Ensure same length
+    if len(recorded) != len(source):
+        raise ValueError(f"Signal lengths must match: recorded={len(recorded)}, source={len(source)}")
+    
+    # FFT of both signals
+    G = np.fft.rfft(recorded)
+    S = np.fft.rfft(source)
+    
+    # Wiener filter: H = G * conj(S) / (|S|^2 + λ)
+    S_conj = np.conj(S)
+    S_power = np.abs(S) ** 2
+    
+    # Scale regularization by max power for numerical stability
+    # Use max(max_power, eps) to handle zero source case
+    max_power = np.max(S_power)
+    if max_power == 0:
+        max_power = 1.0  # Avoid zero regularization for zero source
+    lambda_reg = regularization * max_power
+    
+    H = (G * S_conj) / (S_power + lambda_reg)
+    
+    # Transform back to time domain
+    ir = np.fft.irfft(H, n=len(recorded))
+    
+    return ir
+
+
 def fdtd_spacing(f_max: float, points_per_wavelength: int) -> float:
     """Calculate FDTD grid spacing from maximum frequency.
     
@@ -584,12 +640,7 @@ class Microphone:
     ) -> Tuple[np.ndarray, int]:
         """Extract impulse response by deconvolving the source signal from recording.
         
-        Uses Wiener deconvolution: H(f) = G(f) * conj(S(f)) / (|S(f)|^2 + λ)
-        where:
-            - H(f) is the impulse response (what we want)
-            - G(f) is the recorded signal
-            - S(f) is the source signal
-            - λ is the regularization parameter
+        Uses Wiener deconvolution via wiener_deconvolve().
         
         Args:
             source: The Source object that was used in the simulation
@@ -618,21 +669,8 @@ class Microphone:
             t = i * dt
             source_signal[i] = source.get_value(t, dt)
         
-        # Perform Wiener deconvolution in frequency domain
-        G = np.fft.rfft(recording)
-        S = np.fft.rfft(source_signal)
-        
-        # Wiener filter: H = G * conj(S) / (|S|^2 + λ)
-        S_conj = np.conj(S)
-        S_power = np.abs(S) ** 2
-        
-        # Adaptive regularization based on signal power
-        lambda_reg = regularization * np.max(S_power)
-        
-        H = (G * S_conj) / (S_power + lambda_reg)
-        
-        # Transform back to time domain
-        ir = np.fft.irfft(H)
+        # Perform Wiener deconvolution
+        ir = wiener_deconvolve(recording, source_signal, regularization)
         
         # Resample to target sample rate
         native_sr = 1.0 / dt
