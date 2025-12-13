@@ -720,6 +720,11 @@ class Microphone:
             normalize=normalize
         )
         
+        # Ensure output directory exists
+        output_dir = os.path.dirname(filename)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+        
         # Convert to 16-bit integer
         ir_int = (ir * 32767).astype(np.int16)
         wavfile.write(filename, sr, ir_int)
@@ -1415,7 +1420,9 @@ def fdtd_rectangle_with_pml(x: float, y: float, f_max: float, courant: float,
                             output_file: Optional[str] = None,
                             mic_positions: Optional[List[Tuple[float, float]]] = None,
                             audio_output_prefix: Optional[str] = None,
-                            audio_sr: int = 44100):
+                            audio_sr: int = 44100,
+                            save_ir: bool = False,
+                            ir_regularization: float = 1e-3):
     """Create and run FDTD simulation with PML boundaries and visualization.
     
     This function recreates the original notebook functionality using the new
@@ -1439,6 +1446,8 @@ def fdtd_rectangle_with_pml(x: float, y: float, f_max: float, courant: float,
         audio_output_prefix: Prefix for audio output files (default: 'fdtd_audio').
                             Files will be named '{prefix}_mic{i}.wav'
         audio_sr: Sample rate for audio output (default: 44100 Hz)
+        save_ir: Whether to save impulse responses (deconvolved from recordings)
+        ir_regularization: Wiener deconvolution regularization parameter (default: 1e-3)
         
     Returns:
         If viz=True and output_file is set: saves animation to file, returns microphones (if any)
@@ -1455,7 +1464,8 @@ def fdtd_rectangle_with_pml(x: float, y: float, f_max: float, courant: float,
     source_x = x / 2.0
     source_y = y / 2.0
     # Use band-limited Gaussian pulse instead of impulse to avoid aliasing issues
-    grid.add_source(RickerWaveletSource(source_x, source_y, f_peak=f_max / 2.0, amplitude=source_strength / 100.0))
+    source = RickerWaveletSource(source_x, source_y, f_peak=f_max / 2.0, amplitude=source_strength / 100.0)
+    grid.add_source(source)
     
     # Add microphones if specified
     microphones: List[Microphone] = []
@@ -1509,6 +1519,15 @@ def fdtd_rectangle_with_pml(x: float, y: float, f_max: float, courant: float,
             for i, mic in enumerate(microphones):
                 filename = f"{prefix}_mic{i}.wav"
                 mic.save_wav(filename, target_sr=audio_sr)
+                
+                if save_ir:
+                    ir_filename = f"{prefix}_ir{i}.wav"
+                    mic.save_impulse_response(
+                        source=source,
+                        filename=ir_filename,
+                        regularization=ir_regularization,
+                        target_sr=audio_sr
+                    )
         
         return grid.p_1, microphones
     
@@ -1664,6 +1683,15 @@ def fdtd_rectangle_with_pml(x: float, y: float, f_max: float, courant: float,
             for i, mic in enumerate(microphones):
                 filename = f"{prefix}_mic{i}.wav"
                 mic.save_wav(filename, target_sr=audio_sr)
+                
+                if save_ir:
+                    ir_filename = f"{prefix}_ir{i}.wav"
+                    mic.save_impulse_response(
+                        source=source,
+                        filename=ir_filename,
+                        regularization=ir_regularization,
+                        target_sr=audio_sr
+                    )
         
         return microphones if microphones else None
     else:
@@ -1685,6 +1713,7 @@ if __name__ == "__main__":
         pml_thickness=15, 
         output_file='output/fdtd_animation.gif',
         mic_positions=[(2, 2)],
+        save_ir=True,
     )
     
     # Keep animation in scope to prevent garbage collection
