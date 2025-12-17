@@ -316,7 +316,95 @@ def find_largest_pow2_rect(grid: np.ndarray, covered: np.ndarray,
 
 
 # =============================================================================
-# Main decomposition
+# Simple rectangle growing (no power-of-two constraint)
+# =============================================================================
+
+def _grow_max_rect(grid: np.ndarray, covered: np.ndarray,
+                   seed_x: int, seed_y: int) -> Rectangle:
+    """Grow the largest possible rectangle from a seed cell (no size constraints).
+    
+    Uses a greedy approach: alternately try to expand in each direction.
+    """
+    x, y = seed_x, seed_y
+    width, height = 1, 1
+    
+    # Keep expanding until we can't anymore
+    expanded = True
+    while expanded:
+        expanded = False
+        
+        # Try expanding right
+        if _can_expand(grid, covered, x, y, width, height, 'right', 1):
+            width += 1
+            expanded = True
+        
+        # Try expanding up
+        if _can_expand(grid, covered, x, y, width, height, 'up', 1):
+            height += 1
+            expanded = True
+        
+        # Try expanding left
+        if _can_expand(grid, covered, x, y, width, height, 'left', 1):
+            x -= 1
+            width += 1
+            expanded = True
+        
+        # Try expanding down
+        if _can_expand(grid, covered, x, y, width, height, 'down', 1):
+            y -= 1
+            height += 1
+            expanded = True
+    
+    return Rectangle(x=x, y=y, width=width, height=height)
+
+
+def decompose_simple(grid: np.ndarray, 
+                     random_seed: Optional[int] = None) -> List[Rectangle]:
+    """Decompose a binary occupancy grid into rectangles (no size constraints).
+    
+    Args:
+        grid: 2D boolean numpy array (True = empty/air, False = wall/occupied)
+        random_seed: Seed for reproducible decomposition
+    
+    Returns:
+        List of non-overlapping Rectangle objects covering all empty cells
+    """
+    if grid.ndim != 2:
+        raise ValueError(f"Expected 2D grid, got {grid.ndim}D")
+    
+    grid = grid.astype(bool)
+    covered = np.zeros_like(grid, dtype=bool)
+    rectangles: List[Rectangle] = []
+    
+    # Find all empty cells
+    empty_cells = np.argwhere(grid)
+    
+    if len(empty_cells) == 0:
+        return rectangles
+    
+    rng = np.random.default_rng(random_seed)
+    uncovered_set = set(map(tuple, empty_cells))
+    
+    while uncovered_set:
+        # Pick a random uncovered cell
+        cell = rng.choice(list(uncovered_set))
+        y, x = cell[0], cell[1]
+        
+        # Grow rectangle from this seed
+        rect = _grow_max_rect(grid, covered, x, y)
+        rectangles.append(rect)
+        
+        # Mark cells as covered
+        for ry in range(rect.y, rect.y2):
+            for rx in range(rect.x, rect.x2):
+                covered[ry, rx] = True
+                uncovered_set.discard((ry, rx))
+    
+    return rectangles
+
+
+# =============================================================================
+# Main decomposition (power-of-two)
 # =============================================================================
 
 def decompose(grid: np.ndarray, 
